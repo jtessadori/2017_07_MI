@@ -354,8 +354,8 @@ classdef MI_session
         %% Results analysis and plotting
         function plotErrPs(obj)
             freqData=freqFilter(obj,obj.rawData.data);
-            CARdata=CARfilter(freqData);
-            timeWins=splitData(obj.errPtimeStamps*obj.fs,CARdata,obj.fs);
+            CARdata=MI_session.CARfilter(freqData);
+            timeWins=MI_session.splitData(obj.errPtimeStamps*obj.fs,CARdata,obj.fs);
             errs=1-(obj.trialLbls==obj.fbLbls);
             for currCh=1:size(freqData,2)
                 subplot(4,5,currCh);
@@ -371,12 +371,12 @@ classdef MI_session
         end
         function trndClassifier=trainErrP(obj)
 %             trimmedData=trimData(obj.rawData.data);
-            freqData=freqFilter(obj,obj.rawData.data);
-            [CARdata,coeffs]=CARfilter(freqData);
-            shortData=downsampleData(CARdata,obj.fs);
-            timeWins=splitData(round(obj.errPtimeStamps*64),shortData,64);
-            timeWinsLong=splitData(round(obj.errPtimeStamps*obj.fs),CARdata,obj.fs);
-            fftData=recoverFrequencyData(timeWinsLong);
+            freqData=MI_session.freqFilter(obj.rawData.data,obj.fs);
+            [CARdata,coeffs]=MI_session.CARfilter(freqData);
+            shortData=MI_session.downsampleData(CARdata,obj.fs);
+            timeWins=MI_session.splitData(round(obj.errPtimeStamps*64),shortData,64);
+            timeWinsLong=MI_session.splitData(round(obj.errPtimeStamps*obj.fs),CARdata,obj.fs);
+            fftData=MI_session.recoverFrequencyData(timeWinsLong);
             errs=1-(obj.trialLbls==obj.fbLbls);
             feats=cat(2,fftData,reshape(timeWins,length(errs),[]));
 %             feats=reshape(timeWins,length(errs),[]);
@@ -405,34 +405,46 @@ classdef MI_session
             trndClassifier.coeffs=coeffs;
         end
         function plotMIs(obj)
-            lapData=applyLapFilter(obj.rawData.data);
-            timeFreq=bankFilter(obj,lapData);
-            keyboard;
-%             freqData=freqFilter(obj,obj.rawData.data);
-%             lapData=applyLapFilter(freqData);
-%             timeWinsLong=splitData(round(obj.errPtimeStamps*obj.fs),lapData,obj.fs*4);
-%             for currCh=1:size(freqData,2)
-%                 subplot(4,5,currCh);
-%                 plot(linspace(0,4,obj.fs*4),squeeze(median(timeWinsLong(obj.trialLbls==1,:,currCh))));
-%                 hold on
-%                 plot(linspace(0,4,obj.fs*4),squeeze(median(timeWinsLong(obj.trialLbls==2,:,currCh))),'r');
-%                 plot(linspace(0,4,obj.fs*4),squeeze(median(timeWinsLong(obj.trialLbls==3,:,currCh))),'g');
-%                 plot(linspace(0,4,obj.fs*4),squeeze(median(timeWinsLong(obj.trialLbls==4,:,currCh))),'k');
-%             end
+%             lapData=applyLapFilter(obj.rawData.data);
+%             timeFreq=bankFilter(obj,lapData);
+%             keyboard;
+            freqData=freqFilter(obj,obj.rawData.data);
+            lapData=applyLapFilter(freqData);
+            timeWinsLong=MI_session.splitData(round(obj.MItimeStamps*obj.fs),lapData,obj.fs*4);
+            for currCh=1:size(freqData,2)
+                subplot(4,5,currCh);
+                plot(linspace(0,4,obj.fs*4),squeeze(median(timeWinsLong(obj.trialLbls==1,:,currCh))));
+                hold on
+                plot(linspace(0,4,obj.fs*4),squeeze(median(timeWinsLong(obj.trialLbls==2,:,currCh))),'r');
+                plot(linspace(0,4,obj.fs*4),squeeze(median(timeWinsLong(obj.trialLbls==3,:,currCh))),'g');
+                plot(linspace(0,4,obj.fs*4),squeeze(median(timeWinsLong(obj.trialLbls==4,:,currCh))),'k');
+            end
         end
         function trndClassifier=trainMI(obj)
             freqData=freqFilter(obj,obj.rawData.data);
             lapData=applyLapFilter(freqData);
             shortData=downsampleData(lapData,obj.fs);
-            timeWins=splitData(round(obj.MItimeStamps*64),shortData,64*4);
-            timeWinsLong=splitData(round(obj.MItimeStamps*obj.fs),lapData,obj.fs*4);
+            timeWins=MI_session.splitData(round(obj.MItimeStamps*64),shortData,64*4);
+            timeWinsLong=MI_session.splitData(round(obj.MItimeStamps*obj.fs),lapData,obj.fs*4);
             fftData=recoverFrequencyData(timeWinsLong);
             lbls=obj.trialLbls;
             feats=cat(2,fftData,reshape(timeWins,length(lbls),[]));
             
+%                         classifier=fitcdiscr(feats,lbls);
+%             coeffsSum=zeros(size(classifier.Coeffs(1,2).Linear));
+%             for c1=1:4
+%                 for c2=1:4
+%                     if c1~=c2
+%                         coeffsSum=coeffsSum+abs(classifier.Coeffs(c1,c2).Linear);
+%                     end
+%                 end
+%             end
+%             [~,coeffsOrdr]=sort(coeffsSum,'descend');
+%             relFeats=coeffsOrdr(1:20);
+            
             cv=cvpartition(length(lbls),'leaveout');
             classEst=zeros(size(lbls));
-            scores=zeros(length(lbls),2);
+            scores=zeros(length(lbls),length(unique(lbls)));
             for currP=1:cv.NumTestSets
                 % Recover training and testing sets and labels
                 trainData=feats(cv.training(currP),:);
@@ -440,24 +452,43 @@ classdef MI_session
                 trainLbls=lbls(cv.training(currP));
                 
                 % Perform classification
-                classifier=fitcsvm(trainData,trainLbls,'KernelScale','auto','Standardize',true);
-                [classEst(cv.test(currP)),scores(cv.test(currP),:)]=predict(classifier,testData);
+                classifier=fitcdiscr(trainData,trainLbls);
+                coeffsSum=zeros(size(classifier.Coeffs(1,2).Linear));
+                for c1=1:4
+                    for c2=1:4
+                        if c1~=c2
+                            coeffsSum=coeffsSum+abs(classifier.Coeffs(c1,c2).Linear);
+                        end
+                    end
+                end
+                [~,coeffsOrdr]=sort(coeffsSum,'descend');
+                relFeats=coeffsOrdr(1:40);
+                lblsMat=zeros(length(trainLbls),length(unique(lbls)));
+                for currClass=1:4
+                    lblsMat(trainLbls==currClass,currClass)=1;
+                end
+                [A,~,~,U]=canoncorr(trainData(:,relFeats),lblsMat);
+                classifier=fitcdiscr(U,trainLbls);
+                U=(testData(:,relFeats)-mean(testData(:,relFeats)))*A;
+                [classEst(cv.test(currP)),scores(cv.test(currP),:)]=predict(classifier,U);
             end
-            [~,~,~,AUC]=perfcurve(lbls,scores(:,1),0);
-            accs=[sum((classEst==0).*(lbls==0))/sum(lbls==0),sum((classEst==1).*(lbls==1))/sum(lbls==1)];
-            
-            fprintf('Mean acc: %0.2f %0.2f\nAUC: %0.2f\ncurrent r: %0.2f\n',accs(1),accs(2),AUC,r)
-            
-            % Train final classifier
-            trndClassifier.classifier=fitcsvm(feats,lbls,'KernelScale','auto','Standardize',true,'Cost',[0,r;1-r,0]);
-            trndClassifier.coeffs=coeffs;
-        end
-        function freqData=freqFilter(obj,inData)
-            [B,A]=butter(4,[1,10]/(obj.fs/2));
-            freqData=zeros(size(obj.rawData.Data));
-             for currCh=1:size(freqData,2)
-                freqData(:,currCh)=filter(B,A,inData(:,currCh));
+%                 
+%                 
+%                 classifier=fitcsvm(trainData,trainLbls,'KernelScale','auto','Standardize',true);
+%                 [classEst(cv.test(currP)),scores(cv.test(currP),:)]=predict(classifier,testData);
+%             end
+%             [~,~,~,AUC]=perfcurve(lbls,scores(:,1),0);
+            AUC=0;
+            for currClass=1:length(unique(lbls))
+                accs(currClass)=sum((classEst==currClass).*(lbls==currClass))/sum(lbls==currClass); %#ok<AGROW>
             end
+            
+            fprintf('Mean acc: %0.2f %0.2f\nAUC: %0.2f\n\n',accs(1),accs(2),AUC)
+            
+            trndClassifier.classifier=classifier;
+%             % Train final classifier
+%             trndClassifier.classifier=fitcsvm(feats,lbls,'KernelScale','auto','Standardize',true,'Cost',[0,r;1-r,0]);
+%             trndClassifier.coeffs=coeffs;
         end
         function outData=bankFilter(obj,inData)
             [B,A]=butter(4,[1,32]/(obj.fs/2));
@@ -490,6 +521,65 @@ classdef MI_session
             % Signals experiment to close
             assignin('base','isExpClosing',1);
         end
+        %% Preprocessing
+        function freqData=freqFilter(inData,fs,varargin)
+            % If two arguments are passed, band-pass between 1 and 10 Hz.
+            % If a third argument (vector of two real numbers) is passed,
+            % use those as limits of band-pass filter
+            if nargin>2
+                freqLims=varargin{1};
+            else
+                freqLims=[1,10];
+            end            
+            [B,A]=butter(4,freqLims/(fs/2));
+            freqData=zeros(size(inData));
+            for currCh=1:size(freqData,2)
+                freqData(:,currCh)=filter(B,A,inData(:,currCh));
+            end
+        end
+        function [CARdata,coeff]=CARfilter(inData)
+            CARdata=zeros(size(inData));
+            coeff=zeros(1,size(inData,2));
+            for currCh=1:size(inData,2)
+                otherChsMedian=median(inData(:,[1:currCh-1,currCh+1:end]),2);
+                coeff(currCh)=pinv(otherChsMedian)*inData(:,currCh);
+                CARdata(:,currCh)=inData(:,currCh)-otherChsMedian*coeff(currCh);
+            end
+        end
+        function timeWins=splitData(timeStamps,inData,winLength)
+            timeWins=zeros(length(timeStamps),winLength,size(inData,2));
+            for currTimeStamp=1:length(timeStamps)
+                timeWins(currTimeStamp,:,:)=inData(timeStamps(currTimeStamp)+1:timeStamps(currTimeStamp)+winLength,:);
+            end
+        end
+        function shortData=downsampleData(inData,fs)
+            shortData=resample(inData,64,fs);
+        end
+        function fftData=recoverFrequencyData(inData)
+            fftData=fft(inData.*repmat(blackman(size(inData,2))',size(inData,1),1,size(inData,3)),[],2);
+            fftData=fftData(:,2:20,:);
+            fftData=reshape([real(fftData),imag(fftData)],size(fftData,1),[]);
+        end
+        function outData=applyLapFilter(inData)
+            try
+                load('elMap20.mat')
+            catch ME %#ok<NASGU>
+                warning('''elMap20.mat'' not found. Electrode map required for laplacian filters.');
+                outData=[];
+                return;
+            end
+            fltrWeights=zeros(size(inData,2));
+            for currEl=1:size(inData,2)
+                neighborsMap=zeros(size(elMap20.elMat));
+                neighborsMap(elMap20.elMat==currEl)=1;
+                neighborsMap=imdilate(neighborsMap,strel('diamond',1));
+                neighborsMap(elMap20.elMat==currEl)=0;
+                validNeighbors=logical(neighborsMap.*elMap20.elMat);
+                fltrWeights(currEl,elMap20.elMat(validNeighbors))=-1/sum(sum(validNeighbors));
+                fltrWeights(currEl,currEl)=1;
+            end
+            outData=inData*fltrWeights;
+        end
     end
 end
 
@@ -517,54 +607,4 @@ function OnClosing(~,~)
 % Overrides normal closing procedure so that regardless of how figure is
 % closed logged data is not lost
 MI_session.closeExp;
-end
-
-% Analysis functions
-function [CARdata,coeff]=CARfilter(inData)
-CARdata=zeros(size(inData));
-coeff=zeros(1,size(inData,2));
-for currCh=1:size(inData,2)
-    otherChsMedian=median(inData(:,[1:currCh-1,currCh+1:end]),2);
-    coeff(currCh)=pinv(otherChsMedian)*inData(:,currCh);
-    CARdata(:,currCh)=inData(:,currCh)-otherChsMedian*coeff(currCh);
-end
-end
-function timeWins=splitData(timeStamps,inData,winLength)
-timeWins=zeros(length(timeStamps),winLength,size(inData,2));
-for currTimeStamp=1:length(timeStamps)
-    timeWins(currTimeStamp,:,:)=inData(timeStamps(currTimeStamp)+1:timeStamps(currTimeStamp)+winLength,:);
-end
-end
-function shortData=downsampleData(inData,fs)
-shortData=resample(inData,64,fs);
-end
-function fftData=recoverFrequencyData(inData)
-        fftData=fft(inData.*repmat(blackman(size(inData,2))',size(inData,1),1,size(inData,3)),[],2);
-        fftData=fftData(:,2:20,:);
-        fftData=reshape([real(fftData),imag(fftData)],size(fftData,1),[]);
-end
-% function outData=trimData(inData)
-% sdEst=median(abs(inData));
-% k=5;
-% outData=atan(inData./(repmat(sdEst,size(inData,1),1)*k));
-% end
-function outData=applyLapFilter(inData)
-try
-    load('elMap20.mat')
-catch ME %#ok<NASGU>
-    warning('''elMap20.mat'' not found. Electrode map required for laplacian filters.');
-    outData=[];
-    return;
-end
-fltrWeights=zeros(size(inData,2));
-for currEl=1:size(inData,2)
-    neighborsMap=zeros(size(elMap20.elMat));
-    neighborsMap(elMap20.elMat==currEl)=1;
-    neighborsMap=imdilate(neighborsMap,strel('diamond',1));
-    neighborsMap(elMap20.elMat==currEl)=0;
-    validNeighbors=logical(neighborsMap.*elMap20.elMat);
-    fltrWeights(currEl,elMap20.elMat(validNeighbors))=-1/sum(sum(validNeighbors));
-    fltrWeights(currEl,currEl)=1;
-end
-outData=inData*fltrWeights;
 end
