@@ -9,7 +9,6 @@ classdef RT_MI_session
         timingParams;
         figureParams;
         colorScheme;
-        eventLog;
         modelName;
         timeTriggeredEvents;
         targetPos;
@@ -29,16 +28,16 @@ classdef RT_MI_session
         %% Constructor
         function obj=RT_MI_session()
             % Define number of trials and position of pauses
-            obj.trialParams.trialsPerSession=90;
+            obj.trialParams.trialsPerSession=40;
             obj.trialParams.pausesPerSession=2;
             obj.trialParams.pausingTrials=linspace(1,obj.trialParams.trialsPerSession,obj.trialParams.pausesPerSession+2);
             obj.trialParams.pausingTrials=round(obj.trialParams.pausingTrials(2:end-1));
             
             % Set period length for different experiment parts
-            obj.timingParams.cueMinLength=5;
+            obj.timingParams.cueMinLength=4;
             obj.timingParams.cueVarLength=2;
-            obj.timingParams.waitMinLength=8;
-            obj.timingParams.waitVarLength=2;
+            obj.timingParams.waitMinLength=6;
+            obj.timingParams.waitVarLength=3;
             
             % Set colors for different objects
             obj.colorScheme.bg=[.05,.05,.05];
@@ -52,11 +51,10 @@ classdef RT_MI_session
             obj.targetPos(2).Y=[.8,.8,.9,.9];
             
             % Initialize a few things
-            obj.eventLog.Times=[];
-            obj.eventLog.Event=cell(0);
             obj.outputLog.actualState=[];
             obj.outputLog.estState=[];
             obj.outputLog.time=[];
+            obj.outputLog.stateProbs=[];
             
             % Ask user whether to start experiment right away
             clc;
@@ -93,7 +91,7 @@ classdef RT_MI_session
             obj.timeTriggeredEvents{2}=timeTriggeredEvent('updateCursor',0);
             
             % Shows a countdown
-            obj.startCountdown(3);
+            obj.startCountdown(120);
             
             % Perform bulk of experiment
             obj=manageExperiment(obj);
@@ -146,8 +144,8 @@ classdef RT_MI_session
                 'WindowButtonMotionFcn',@onMouseMove);
             
             % Plot target position
-            obj.figureParams.target=patch(obj.targetPos(1).X,obj.targetPos(1).Y,obj.colorScheme.targetColor);
             obj.figureParams.cursor=patch(obj.targetPos(1).X,obj.targetPos(1).Y,obj.colorScheme.cursorColor);
+            obj.figureParams.target=patch(obj.targetPos(1).X,obj.targetPos(1).Y,obj.colorScheme.bg,'EdgeColor',obj.colorScheme.targetColor);
             
             % Set and remove figure axis
             ylim([-1,1]);
@@ -161,23 +159,34 @@ classdef RT_MI_session
         end
         function obj=updateScenario(obj)
             set(obj.figureParams.target,'XData',obj.targetPos(obj.currState).X,'YData',obj.targetPos(obj.currState).Y);
+            % Set next evaluation time for this function
+            obj.timeTriggeredEvents{1}.triggersLog=[obj.timeTriggeredEvents{1}.triggersLog,obj.currTime];
             obj.timeTriggeredEvents{1}.nextTrigger=obj.currTime+.01;
         end
         function obj=updateCursor(obj)
-            if obj.condition.conditionID==2%&&evalin('base','exist(''currData'',''var'')')
+            if obj.condition.conditionID==2
                 % Evaluate state using last available data
                 dataWindow=evalin('base','currData');
-                [~,currScores]=RT_MI_session.classifyWindow(dataWindow,obj.trainedClassifier);
+                [currStateEst,currScores]=RT_MI_session.classifyWindow(dataWindow,obj.trainedClassifier);
+                obj.outputLog.stateProbs=cat(1,obj.outputLog.stateProbs,currScores); % Score history has to be updated for next function to work properly
+                if isfield(obj.trainedClassifier,'emis') % i.e. a HMM has been trained
+                    currStateEst=RT_MI_session.timeFilterOutput(obj);
+                end
                 % Update cursor pos on screen
                 movingRangeX=obj.targetPos(2).X-obj.targetPos(1).X;
                 movingRangeY=obj.targetPos(2).Y-obj.targetPos(1).Y;
-                set(obj.figureParams.cursor,'XData',obj.targetPos(1).X+movingRangeX*currScores(2),'YData',obj.targetPos(1).Y+movingRangeY*currScores(2));
-                obj.outputLog.actualState=cat(1,obj.outputLog.actualState,obj.currState);
-                obj.outputLog.estState=cat(1,obj.outputLog.estState,currScores(2));
-                obj.outputLog.time=cat(1,obj.outputLog.time,obj.currTime);
+                if isfield(obj.trainedClassifier,'emis')
+                    set(obj.figureParams.cursor,'XData',obj.targetPos(1).X+movingRangeX*(currStateEst-1),'YData',obj.targetPos(1).Y+movingRangeY*(currStateEst-1));
+                else
+                    set(obj.figureParams.cursor,'XData',obj.targetPos(1).X+movingRangeX*currScores(2),'YData',obj.targetPos(1).Y+movingRangeY*currScores(2));
+                end
+                obj.outputLog.estState=cat(1,obj.outputLog.estState,currStateEst);
             end
-            % Fix next evaluation time for this function
-            obj.timeTriggeredEvents{1}.nextTrigger=obj.currTime+.05;
+            obj.outputLog.actualState=cat(1,obj.outputLog.actualState,obj.currState);
+            obj.outputLog.time=cat(1,obj.outputLog.time,obj.currTime);
+            % Set next evaluation time for this function
+            obj.timeTriggeredEvents{2}.triggersLog=[obj.timeTriggeredEvents{2}.triggersLog,obj.currTime];
+            obj.timeTriggeredEvents{2}.nextTrigger=obj.currTime+.05;
         end
         function obj=selectCondition(obj)
             clc;
@@ -242,7 +251,7 @@ classdef RT_MI_session
         end
         %% Dependent properties
         function rl=get.recLength(obj)
-            rl=sum(obj.timingTable(:,1));
+            rl=max(obj.timingTable(:,1))+5;
         end
         function cTime=get.currTime(obj)
             if obj.isExpClosed
@@ -252,7 +261,11 @@ classdef RT_MI_session
             end
         end
         function cs=get.currState(obj)
-            cs=obj.timingTable(sum(obj.currTime>obj.timingTable(:,1))+1,2)+1;
+            if obj.currTime>=obj.timingTable(end,1)
+                cs=1;
+            else
+                cs=obj.timingTable(sum(obj.currTime>obj.timingTable(:,1))+1,2)+1;
+            end
         end
     end
     methods (Static)
@@ -260,21 +273,19 @@ classdef RT_MI_session
             % Signals experiment to close
             assignin('base','isExpClosing',1);
         end
-        function [currClass,currScores]=classifyWindow(dataWindow,trainedClassifier)
+        function [currClass,currScores,BP]=classifyWindow(dataWindow,trainedClassifier)
             BP=zeros(1,trainedClassifier.nChannels*2); % Initialize band power matrix.
             lapData=dataWindow*trainedClassifier.fltrWeights;
             for currCh=1:trainedClassifier.nChannels
                 % Compute power in input window using Yule-Walker PSD
-                pxx=pyulear(lapData(:,currCh),trainedClassifier.ARmodelOrder);
+                pxx=pyulear(detrend(lapData(:,currCh)),trainedClassifier.ARmodelOrder);
                 
                 % Compute power in bands of interest
                 binCenters=linspace(1/trainedClassifier.fs,trainedClassifier.fs/2,size(pxx,1));
-                [~,bandStart(1)]=min(abs(binCenters-trainedClassifier.bandLims(1)));
-                [~,bandEnd(1)]=min(abs(binCenters-trainedClassifier.bandLims(2)));
-                [~,bandStart(2)]=min(abs(binCenters-trainedClassifier.bandLims(3)));
-                [~,bandEnd(2)]=min(abs(binCenters-trainedClassifier.bandLims(4)));
-                for currBand=1:2
-                    BP((currCh-1)*2+currBand)=log(sum(pxx(bandStart(currBand):bandEnd(currBand),:)))';
+                for currBand=1:length(trainedClassifier.bandLims)/2
+                    [~,bandStart]=min(abs(binCenters-trainedClassifier.bandLims(currBand*2-1)));
+                    [~,bandEnd]=min(abs(binCenters-trainedClassifier.bandLims(currBand*2)));
+                    BP(:,(currCh-1)*length(trainedClassifier.bandLims)/2+currBand)=log(sum(pxx(bandStart:bandEnd,:)))';
                 end
             end
             [currClass,currScores]=predict(trainedClassifier.classifier,BP);
@@ -285,7 +296,9 @@ classdef RT_MI_session
             % analysis on selected file. If a path to a file is provided as
             % an argument, analysis is performed on indicated file. If a
             % structure is provided as argument, it is assumed to contain
-            % classifier parameters that override default.
+            % classifier parameters that override default. An object of
+            % class RT_MI_session may also be passed and it will be used to
+            % train classifier
             persistent pathName
             
             % Check for presence of file
@@ -293,6 +306,11 @@ classdef RT_MI_session
                 for currArg=1:nargin
                     if isa(varargin{currArg},'char')&&exist(varargin{currArg},'file')
                         load(varargin{currArg});
+                        noFileFound=0;
+                        break;
+                    end
+                    if isa(varargin{currArg},'RT_MI_session')
+                        obj=varargin{currArg};
                         noFileFound=0;
                         break;
                     end
@@ -312,11 +330,18 @@ classdef RT_MI_session
                 load(sprintf('%s%s',pathName,fileName));
             end
             
+            % If loaded file containes a trainedClassifier variable, use
+            % that and skip training
+            if exist('trainedClassifier','var')
+                return;
+            end
+            
             % Default parameters
             trainedClassifierDefault.fs=obj.fs;
             trainedClassifierDefault.ARmodelOrder=6; % Not sure how this impacts results
-            trainedClassifierDefault.bandLims=[8,12,18,25]; % Limits of band of interest - i.e. 8-to-12 and 18-to-25
+%             trainedClassifierDefault.bandLims=[8,12,18,25]; % Limits of band of interest - i.e. 8-to-12 and 18-to-25
 %             trainedClassifierDefault.bandLims=ceil((1:.5:24.5)); % Limits of band of interest - single Hertz bands from 1 to 25
+            trainedClassifierDefault.bandLims=[10,14];
             trainedClassifierDefault.winStep=.5; % Step, in seconds
             trainedClassifierDefault.winLength=1; % Window length, in seconds
             trainedClassifierDefault.nChannels=size(obj.rawData.Data,2);
@@ -344,27 +369,29 @@ classdef RT_MI_session
             % Lap filters (assuming here data were acquired with the 20 channels setup)
             [lapData,trainedClassifier.fltrWeights]=RT_MI_session.applyLapFilter(obj.rawData.Data);
             
-% %             Time filter
-%             [B,A]=butter(4,2/(obj.fs/2));
-%             lapData=filter(B,A,lapData);
+%             Time filter
+            [B,A]=butter(4,2/(obj.fs/2));
+            lapData=filter(B,A,lapData);
     
-            winStarts=round((0:trainedClassifier.winStep:obj.currTime-trainedClassifier.winLength)*trainedClassifier.fs);
+            winStarts=round((trainedClassifier.winLength:trainedClassifier.winStep:obj.currTime)*trainedClassifier.fs);
+%             winStarts=round((0:trainedClassifier.winStep:obj.currTime-trainedClassifier.winLength)*trainedClassifier.fs);
             BP=zeros(length(winStarts),size(obj.rawData.Data,2)*length(trainedClassifier.bandLims)/2); % Initialize band power matrix. Time points x (nChannes x nBands)
             for currCh=1:size(obj.rawData.Data,2)
                 % Split data in windows
                 relData=zeros(length(winStarts),trainedClassifier.winLength*obj.fs);
                 for currWin=1:length(winStarts)
-                    relData(currWin,:)=lapData(winStarts(currWin)+1:winStarts(currWin)+obj.fs*trainedClassifier.winLength,currCh);
+                    relData(currWin,:)=lapData(winStarts(currWin)-obj.fs*trainedClassifier.winLength+1:winStarts(currWin),currCh);
+%                     relData(currWin,:)=lapData(winStarts(currWin)+1:winStarts(currWin)+obj.fs*trainedClassifier.winLength,currCh);
                 end
                 
                 % Compute power in each window using Yule-Walker PSD
                 matLabVersion=version;
                 if matLabVersion(1)=='9' % Previous versions of matlab did not support the use of pyulear on matrices
-                    pxx=pyulear(relData',trainedClassifier.ARmodelOrder);
+                    pxx=pyulear(detrend(relData'),trainedClassifier.ARmodelOrder);
                 else
                     pxx=zeros(obj.fs/4+1,length(winStarts));
                     for currWin=1:length(winStarts)
-                        pxx(:,currWin)=pyulear(relData(currWin,:),trainedClassifier.ARmodelOrder);
+                        pxx(:,currWin)=pyulear(detrend(relData(currWin,:)),trainedClassifier.ARmodelOrder);
                     end
                 end
                 
@@ -380,22 +407,40 @@ classdef RT_MI_session
                 fprintf('%d/%d\n',currCh,size(obj.rawData.Data,2));
             end
             feats=BP;
+            feats=(feats-repmat(mean(feats,2),1,size(feats,2)))./repmat(std(feats,[],2),1,size(feats,2));
             
             % Get proper labels
             lbls=zeros(length(winStarts),1);
+            obj.timingTable(end,1)=Inf; % Suppose last state is protracted forever
             for currWin=1:length(lbls)
                 lbls(currWin)=obj.timingTable(sum((winStarts(currWin)/obj.fs)>obj.timingTable(:,1))+1,2);
             end
             
+%             lbls=zeros(length(obj.rawData.Data),1);
+%             for currState=1:length(obj.outputLog.time)-1
+%                 lbls(obj.outputLog.time(currState)*obj.fs+1:obj.outputLog.time(currState+1)*obj.fs)=obj.outputLog.actualState(currState)-1;
+%             end
+%             lbls=lbls(winStarts);
+            
             % Skip first samples to limit amount of initial artifact 
-            lbls(1:round(60/trainedClassifier.winStep))=[];
-            feats(1:round(60/trainedClassifier.winStep),:)=[];
+            lbls(1:round(120/trainedClassifier.winStep))=[];
+            feats(1:round(120/trainedClassifier.winStep),:)=[];
+            
+            % Try avoiding first section of each transition (not sure about
+            % human response delay)
+            stateChangeIdx=find(diff(lbls)~=0);
+            relIdxs=[];
+            for currGroup=1:length(stateChangeIdx)-1
+                relIdxs=[relIdxs,stateChangeIdx(currGroup)+round(trainedClassifier.winLength/trainedClassifier.winStep)+2:stateChangeIdx(currGroup+1)]; %#ok<AGROW>
+            end
+            lbls=lbls(relIdxs);
+            feats=feats(relIdxs,:);
             
             % Train a SVM for each class (excluding 0)
-%             C=cvpartition(length(lbls),'kfold',10);
+%             C=cvpartition(length(lbls),'kfold',10); % This is Matlab default for creating cross-validation sets. It splits data randomly, however
             C.NumTestSets=4;
-            C.groups=ceil(linspace(1/length(lbls),C.NumTestSets,length(lbls)));
-%             C.groups=ceil(rand(size(lbls))*C.NumTestSets);
+            C.groups=ceil(linspace(1/length(lbls),C.NumTestSets,length(lbls))); % This divides data in consecutive blocks
+%             C.groups=ceil(rand(size(lbls))*C.NumTestSets); % This divides data randomly
             C.training=@(currGroup)C.groups~=currGroup;
             C.test=@(currGroup)C.groups==currGroup;
             classEst=zeros(length(lbls),1);
@@ -405,20 +450,56 @@ classdef RT_MI_session
                 trainData=feats(C.training(currP),:);
                 testData=feats(C.test(currP),:);
                 trainLbls=double(lbls(C.training(currP)));
-                
+%                 testLbls=double(lbls(C.test(currP)));
+                                
                 % Perform actual training
-                svm=fitcsvm(trainData,trainLbls,'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',2);
-                svm=fitPosterior(svm);
-                [classEst(C.test(currP)),scores(C.test(currP),:)]=predict(svm,testData);
+                classifier=fitcsvm(trainData,trainLbls,'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',2);
+                classifier=fitPosterior(classifier);
+%                 classifier=fitcdiscr(trainData,trainLbls);
+                [classEst(C.test(currP)),scores(C.test(currP),:)]=predict(classifier,testData);
+                
+%                 % Train HMM
+%                 nBins=10;
+%                 binLimits=prctile(scores(C.test(currP),2),linspace(0,100,nBins));
+%                 binLimits(1)=-Inf;
+%                 binnedData=sum(repmat(scores(C.test(currP),2),1,length(binLimits))>repmat(binLimits,length(scores(C.test(currP),2)),1),2);
+%                 [trans(:,:,currP),emis(:,:,currP)]=hmmestimate(binnedData,testLbls+1);
             end
             [~,~,~,AUC]=perfcurve(lbls,scores(:,2),1);
             disp(AUC);
             
             % Perform actual training
-            subspaceDimension=max(1,min(60,size(feats,2)-1));
-            trainedClassifier.classifier=fitensemble(feats,lbls,'Subspace',30,'KNN','Type','Classification','NPredToSample',subspaceDimension);
-%             trainedClassifier.classifier=fitcsvm(feats,lbls,'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',2);
-%             trainedClassifier.classifier=fitPosterior(trainedClassifier.classifier);
+            trainedClassifier.classifier=fitcsvm(feats,lbls,'Standardize',true,'KernelScale','auto','KernelFunction','polynomial','PolynomialOrder',2);
+            trainedClassifier.classifier=fitPosterior(trainedClassifier.classifier);
+%             trainedClassifier.classifier=fitcdiscr(feats,lbls);
+            
+%             % Train HMM model to use during experiment for time filtering
+%             trainedClassifier=RT_MI_session.trainHMM(obj,trainedClassifier);
+        end
+        function trainedClassifier=trainHMM(expData,trainedClassifier)
+            lbls=expData.outputLog.actualState;
+            winStarts=expData.outputLog.time*expData.fs;
+            
+            % Skip first samples to limit amount of initial artifact
+            lbls(1:find(winStarts>120,1,'first'))=[];
+            winStarts(1:find(winStarts>120,1,'first'))=[];
+            
+            scores=zeros(length(winStarts),2);
+            for currWin=1:length(winStarts)
+                relData=expData.rawData.Data(winStarts(currWin)+1-expData.fs:winStarts(currWin),:);
+                [~,scores(currWin,:)]=RT_MI_session.classifyWindow(relData,trainedClassifier);
+            end
+            trainedClassifier.binLimits=prctile(scores(:,2),linspace(0,100,round(sqrt(length(winStarts)))));
+            trainedClassifier.binLimits(1)=-Inf;
+            trainedClassifier.binLimits(end)=Inf;
+            binnedData=sum(repmat(scores(:,2),1,length(trainedClassifier.binLimits))>repmat(trainedClassifier.binLimits,length(scores(:,2)),1),2);
+            [trainedClassifier.trans,trainedClassifier.emis]=hmmestimate(binnedData,lbls);
+        end
+        function currStateEst=timeFilterOutput(expData)
+            stateProb=expData.outputLog.stateProbs(:,2);
+            binnedData=sum(repmat(stateProb,1,length(expData.trainedClassifier.binLimits))>repmat(expData.trainedClassifier.binLimits,length(stateProb),1),2);
+            statesEst=hmmviterbi(binnedData,expData.trainedClassifier.trans,expData.trainedClassifier.emis)';
+            currStateEst=statesEst(end);
         end
         function testClassifier
             persistent pathName
@@ -438,7 +519,7 @@ classdef RT_MI_session
             [fileName,pathName]=uigetfile(pathName,'Select file containing classifier to test (cancel to use classifier in loaded data):');
             if fileName~=0
                 load(sprintf('%s%s',pathName,fileName));
-                obj.trainedClassifier=trainedClassifier;
+                obj.trainedClassifier=trainedClassifier; %#ok<CPROP>
             end
             
             scores=zeros(length(obj.outputLog.time),2);
