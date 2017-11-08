@@ -23,13 +23,15 @@ classdef MI_speed_control
     end
     properties (Hidden)
         CDlength;
-        possibleConditions={'1D training, horz','1D testing, horz'};
+        possibleConditions={'1D forced trials, horz','1D free trials, horz','2D forced trials','2D free trials'};
         isExpClosed=0;
         isTraining=0;
         forceTrials=0;
         isCursorVisible;
         actualTarget;
-        lastStage=0;        
+        lastStage=0;
+        inhibitSideMovement=0;
+        cursorSpeed;
     end
     methods
         %% Constructor
@@ -117,12 +119,6 @@ classdef MI_speed_control
             obj.outputLog.feats=[];
             obj.outputLog.isTraining=[];
             obj.outputLog.stage=[];
-            obj.linearMap.feats=cell(obj.nTargets,1);
-            for currTrgt=1:obj.nTargets
-%                 obj.linearMap.feats{currTrgt}=zeros(1,obj.linearMap.nChannels*length(obj.linearMap.bandLims)/2);
-                obj.linearMap.classMedian{currTrgt}=zeros(1,obj.linearMap.nChannels*length(obj.linearMap.bandLims)/2);
-                obj.linearMap.classVar{currTrgt}=zeros(1,obj.linearMap.nChannels*length(obj.linearMap.bandLims)/2);
-            end
             obj.outputLog.targetsReached.time=[];
             obj.outputLog.targetsReached.correctTarget=[];
             obj.outputLog.targetsReached.targetID=[];
@@ -146,7 +142,7 @@ classdef MI_speed_control
             % Prompts user to select a condition
             obj=selectCondition(obj);
             obj=setConditionSpecificParams(obj);
-
+            
             % Randomly select a target
             if obj.currTrial==1
                 obj.actualTarget=obj.trainingParams.targetSequence(obj.currTrial);
@@ -161,9 +157,8 @@ classdef MI_speed_control
             obj=createExpFigure(obj);
             
             % Generates array of time triggered events
-            obj.timeTriggeredEvents{1}=timeTriggeredEvent('updateScenario',0);
-            obj.timeTriggeredEvents{2}=timeTriggeredEvent('updateCursorEvent',0);
-            obj.timeTriggeredEvents{3}=timeTriggeredEvent('toggleTraining',0);
+            obj.timeTriggeredEvents{1}=timeTriggeredEvent('updateGraphic',0);
+            obj.timeTriggeredEvents{2}=timeTriggeredEvent('toggleTraining',0);
             
             % Shows a countdown
             obj.startCountdown(obj.CDlength);
@@ -183,12 +178,12 @@ classdef MI_speed_control
                 for currTTevent=1:length(obj.timeTriggeredEvents);
                     obj=checkAndExecute(obj.timeTriggeredEvents{currTTevent},obj.currTime,obj);
                     pause(0.001);
-                end             
-%                 if ismember(obj.currTrial,obj.pausingTrials)||(evalin('base','exist(''pauseNextTrial'',''var'')')&&evalin('base','pauseNextTrial'))
-%                     assignin('base','pauseNextTrial',0);
-%                     msgH=msgbox('This is a pause. Start again when ready.','Pause','modal');
-%                     uiwait(msgH);
-%                 end
+                end
+                %                 if ismember(obj.currTrial,obj.pausingTrials)||(evalin('base','exist(''pauseNextTrial'',''var'')')&&evalin('base','pauseNextTrial'))
+                %                     assignin('base','pauseNextTrial',0);
+                %                     msgH=msgbox('This is a pause. Start again when ready.','Pause','modal');
+                %                     uiwait(msgH);
+                %                 end
             end
             obj.isExpClosed=1;
             delete(gcf);
@@ -235,12 +230,72 @@ classdef MI_speed_control
             axis('off')
             
             % Remove box around figure
-%             undecorateFig;
+            %             undecorateFig;
         end
         
-        function obj=updateScenario(obj)
+        function obj=updateGraphic(obj)
+            % Recover data buffer from base workspace (Simulink puts them
+            % there)
+            dataWindow=evalin('base','currData');
+%             dataTimeStamp=obj.currTime;
+%             
+%             % Update normalization buffer and normalize data
+%             obj=updateBufferData(obj,newSpeed,dataTimeStamp);
+%             fixDim=@(x)repmat(x,size(newSpeed,1),1);
+%             if obj.bufferData.SD>0 % Skip first window to prevent Infs
+%                 newSpeed=(newSpeed-fixDim(obj.bufferData.mean))./fixDim(obj.bufferData.SD);
+%             end
+            
+            % If this is first iteration, compute laplacian filter weights
+            if ~isfield(obj.linearMap,'lapFltrWeights')
+                [~,obj.linearMap.lapFltrWeights]=MI_speed_control.applyLapFilter(dataWindow);
+            end
+            
+            % Recover bandpower data from data buffer
+            BP=MI_speed_control.preprocData(dataWindow,obj.linearMap);
+            
+            % Next line over-writes actual data for testing purposes.
+            % Should be commented during actual use
+            %             BP=zeros(size(BP));
+            %             BP(1:2)=obj.targetPos{obj.actualTarget};
+            
+            % If training is ongoing, update linear map
+            if obj.isTraining
+                obj=obj.computeLinearMap(BP);
+            end
+            
+            % Evaluate current cursor speed using last available data, if
+            % at least one training step has been completed
+            if isfield(obj.linearMap,'mat')
+                newSpeed=MI_speed_control.computeSpeed(BP,obj.linearMap);
+                
+                % If cursor position is being displayed, update it
+                if obj.isCursorVisible
+                    %                     % Add small help during training
+                    %                     if obj.isTraining
+                    %                         cursorSpeed=cursorSpeed+0.01*sign(obj.targetPos{obj.actualTarget}-obj.cursorPos);
+                    %                     end
+                    if obj.inhibitSideMovement
+                        newSpeed(obj.targetPos{obj.actualTarget}==0)=0;
+                    end
+                    
+%                     % Code for acceleration...
+%                     if isempty(obj.cursorSpeed)
+%                         obj.cursorSpeed=[0,0];
+%                     end
+%                     obj.cursorSpeed=(obj.cursorSpeed*.95+newSpeed/15);
+                    %... or speed
+                    obj.cursorSpeed=newSpeed;
+                    
+                    % Update cursor position
+                    obj=obj.updateCursorPos(obj.cursorSpeed);
+                end
+            else
+                obj.cursorSpeed=[0,0];
+            end
+            
+            % Check whether scenario needs updating
             if obj.forceTrials
-                % Check whether scenario needs updating
                 if obj.currStage>obj.lastStage
                     obj.lastStage=obj.currStage;
                     switch obj.trainingParams.timeTable(obj.currStage,2)
@@ -267,63 +322,8 @@ classdef MI_speed_control
             end
             drawnow;
             
-            % Set next evaluation time for this function
-            obj.timeTriggeredEvents{1}.triggersLog=[obj.timeTriggeredEvents{1}.triggersLog,obj.currTime];
-            obj.timeTriggeredEvents{1}.nextTrigger=obj.currTime+.01;
-        end
-        
-        function obj=updateCursorEvent(obj)
-            % Recover data buffer from base workspace (Simulink puts them
-            % there)
-            dataWindow=evalin('base','currData');
-%             dataTimeStamp=obj.currTime;
-            
-%             % Update normalization buffer and normalize data
-%             obj=updateBufferData(obj,dataWindow,dataTimeStamp);
-%             fixDim=@(x)repmat(x,size(dataWindow,1),1);
-%             if obj.bufferData.SD>0 % Skip first window to prevent Infs
-%                 dataWindow=(dataWindow-fixDim(obj.bufferData.mean))./fixDim(obj.bufferData.SD);
-%             end
-            
-            % If this is first iteration, compute laplacian filter weights
-            if ~isfield(obj.linearMap,'lapFltrWeights')
-                [~,obj.linearMap.lapFltrWeights]=MI_speed_control.applyLapFilter(dataWindow);
-            end
-            
-            % Recover bandpower data from data buffer
-            BP=MI_speed_control.preprocData(dataWindow,obj.linearMap);
-            
-            % Next line over-writes actual data for testing purposes.
-            % Should be commented during actual use
-%             BP=zeros(size(BP));
-%             BP(1:2)=obj.targetPos{obj.actualTarget};
-            
-            % If training is ongoing, update linear map
-            if obj.isTraining
-                obj=obj.computeLinearMap(BP);
-            end
-            
-            % Evaluate current cursor speed using last available data, if
-            % at least one training step has been completed
-            if isfield(obj.linearMap,'mat')
-                cursorSpeed=MI_speed_control.computeSpeed(BP,obj.linearMap);
-                
-                % If cursor position is being displayed, update it
-                if obj.isCursorVisible
-%                     % Add small help during training
-%                     if obj.isTraining
-%                         cursorSpeed=cursorSpeed+0.01*sign(obj.targetPos{obj.actualTarget}-obj.cursorPos);
-%                     end
-                    % Update cursor position
-                    obj=obj.updateCursorPos(cursorSpeed);
-                end
-            else
-                cursorSpeed=[0,0];
-            end
-            drawnow;
-            
             % Add relevant info to log
-            obj.outputLog.cursorSpeed=cat(1,obj.outputLog.cursorSpeed,cursorSpeed);
+            obj.outputLog.cursorSpeed=cat(1,obj.outputLog.cursorSpeed,obj.cursorSpeed);
             obj.outputLog.cursorPos=cat(1,obj.outputLog.cursorPos,obj.cursorPos);
             obj.outputLog.actualTarget=cat(1,obj.outputLog.actualTarget,obj.actualTarget);
             obj.outputLog.feats=cat(1,obj.outputLog.feats,BP);
@@ -337,6 +337,7 @@ classdef MI_speed_control
             for currTarget=1:obj.nTargets
                 if sqrt(sum((obj.cursorPos-obj.targetPos{currTarget}).^2))<obj.figureParams.targetRadius
                     obj.cursorPos=[0,0];
+                    obj.cursorSpeed=[0,0];
                     obj.outputLog.targetsReached.time=cat(1,obj.outputLog.targetsReached.time,obj.currTime);
                     obj.outputLog.targetsReached.correctTarget=cat(1,obj.outputLog.targetsReached.correctTarget,currTarget==obj.actualTarget);
                     obj.outputLog.targetsReached.targetID=cat(1,obj.outputLog.targetsReached.correctTarget,currTarget);
@@ -346,8 +347,8 @@ classdef MI_speed_control
             end
             
             % Set next evaluation time for this function
-            obj.timeTriggeredEvents{2}.triggersLog=[obj.timeTriggeredEvents{2}.triggersLog,obj.currTime];
-            obj.timeTriggeredEvents{2}.nextTrigger=obj.currTime+.05;
+            obj.timeTriggeredEvents{1}.triggersLog=[obj.timeTriggeredEvents{1}.triggersLog,obj.currTime];
+            obj.timeTriggeredEvents{1}.nextTrigger=obj.currTime+.05;
         end
         
         function obj=updateBufferData(obj,dataWindow,dataTimeStamp)
@@ -388,13 +389,7 @@ classdef MI_speed_control
             % fixed number of iterations are required to reach each target
             % from start position
             obj.linearMap.mat=((cell2mat(obj.targetPos')'/50)*pinv(cat(2,cell2mat(obj.linearMap.classMedian'),ones(obj.nTargets,1))'))';
-%             x=cat(2,cell2mat(obj.linearMap.classMedian'),ones(obj.nTargets,1));
-%             y=cell2mat(obj.targetPos')/50;
-%             for currDim=1:2
-%                 [B,fitInfo]=lasso(x,y(:,currDim),'Alpha',.5);
-%                 obj.linearMap.mat(:,currDim)=B(:,fitInfo.MSE==min(fitInfo.MSE));
-%             end
-            
+                        
             % Estimate variance from median to reduce impact of outliers
             obj.linearMap.classVar{obj.actualTarget}=(1/0.6745*median(abs(obj.linearMap.feats{obj.actualTarget}-repmat(obj.linearMap.classMedian{obj.actualTarget},size(obj.linearMap.feats{obj.actualTarget},1),1)))).^2;
         end
@@ -402,6 +397,7 @@ classdef MI_speed_control
         function obj=toggleTraining(obj)
             if evalin('base','exist(''toggleTraining'',''var'')')&&evalin('base','toggleTraining')
                 obj.isTraining=~obj.isTraining;
+                obj.inhibitSideMovement=~obj.inhibitSideMovement;
                 assignin('base','toggleTraining',0);
                 figure(obj.figureParams.handle)
                 if obj.isTraining
@@ -415,8 +411,8 @@ classdef MI_speed_control
             end
             
             % Set next evaluation time for this function
-            obj.timeTriggeredEvents{3}.triggersLog=[obj.timeTriggeredEvents{3}.triggersLog,obj.currTime];
-            obj.timeTriggeredEvents{3}.nextTrigger=obj.currTime+.5;
+            obj.timeTriggeredEvents{2}.triggersLog=[obj.timeTriggeredEvents{2}.triggersLog,obj.currTime];
+            obj.timeTriggeredEvents{2}.nextTrigger=obj.currTime+.5;
         end
         
         function obj=selectCondition(obj)
@@ -436,7 +432,6 @@ classdef MI_speed_control
                     obj.isCursorVisible=0;
                     obj.forceTrials=1;
                     randomPauses=rand(obj.trainingParams.nTrials,1)*(obj.trainingParams.maxITI-obj.trainingParams.minITI);
-                    obj.trainingParams.targetSequence=ceil(rand(obj.trainingParams.nTrials,1)*obj.nTargets);
                     % 0, black screen, 1 fix cross on, 2 cue on
                     obj.trainingParams.timeTable=[];
                     for currTrial=1:obj.trainingParams.nTrials
@@ -448,10 +443,49 @@ classdef MI_speed_control
                     obj.trainingParams.timeTable(:,3)=cumsum(obj.trainingParams.timeTable(:,1));
                     obj.recLength=obj.trainingParams.timeTable(end,3);
                     obj.trainingParams.timeTable(:,3)=obj.trainingParams.timeTable(:,3)+obj.CDlength;
+                    obj.nTargets=2;
+                    obj.trainingParams.targetSequence=ceil(rand(obj.trainingParams.nTrials,1)*obj.nTargets);
                 case 2
                     obj.isTraining=0;
                     obj.isCursorVisible=1;
                     obj.forceTrials=0;
+                    obj.nTargets=2;
+                case 3
+                    obj.isTraining=1;
+                    obj.isCursorVisible=0;
+                    obj.forceTrials=1;
+                    randomPauses=rand(obj.trainingParams.nTrials,1)*(obj.trainingParams.maxITI-obj.trainingParams.minITI);
+                    % 0, black screen, 1 fix cross on, 2 cue on
+                    obj.trainingParams.timeTable=[];
+                    for currTrial=1:obj.trainingParams.nTrials
+                        obj.trainingParams.timeTable=cat(1,obj.trainingParams.timeTable,[randomPauses(currTrial)+obj.trainingParams.minITI,0]);
+                        obj.trainingParams.timeTable=cat(1,obj.trainingParams.timeTable,[obj.trainingParams.fixCross,1]);
+                        obj.trainingParams.timeTable=cat(1,obj.trainingParams.timeTable,[obj.trainingParams.cue,2]);
+                    end
+                    obj.trainingParams.timeTable=cat(1,obj.trainingParams.timeTable,[3,0]); % Add a 3 s pause at the end before closing recording
+                    obj.trainingParams.timeTable(:,3)=cumsum(obj.trainingParams.timeTable(:,1));
+                    obj.recLength=obj.trainingParams.timeTable(end,3);
+                    obj.trainingParams.timeTable(:,3)=obj.trainingParams.timeTable(:,3)+obj.CDlength;
+                    obj.targetPos{3}=[0,-.9];
+                    obj.targetPos{4}=[0,.9];
+                    obj.nTargets=4;
+                    obj.trainingParams.targetSequence=ceil(rand(obj.trainingParams.nTrials,1)*obj.nTargets);
+                case 4
+                    obj.targetPos{3}=[0,-.9];
+                    obj.targetPos{4}=[0,.9];
+                    obj.isTraining=0;
+                    obj.isCursorVisible=1;
+                    obj.forceTrials=0;
+                    obj.nTargets=4;
+            end
+            
+            % The following initializations depend on nTarget and have
+            % therefore to be here
+            obj.linearMap.feats=cell(obj.nTargets,1);
+            for currTrgt=1:obj.nTargets
+                %                 obj.linearMap.feats{currTrgt}=zeros(1,obj.linearMap.nChannels*length(obj.linearMap.bandLims)/2);
+                obj.linearMap.classMedian{currTrgt}=zeros(1,obj.linearMap.nChannels*length(obj.linearMap.bandLims)/2);
+                obj.linearMap.classVar{currTrgt}=zeros(1,obj.linearMap.nChannels*length(obj.linearMap.bandLims)/2);
             end
         end
         
@@ -519,6 +553,105 @@ classdef MI_speed_control
             end
         end
         
+        function obj=computeRegularizedLinearMap(obj)
+            % Try regularized linear regression
+            % Just medians
+            %             x=cat(2,cell2mat(obj.linearMap.classMedian'),ones(obj.nTargets,1));
+            %             y=cell2mat(obj.targetPos')/50;
+            % All past samples
+            x=obj.outputLog.feats;
+            y=zeros(length(x),2);
+            for currT=1:length(obj.outputLog.feats)
+                y(currT,:)=obj.targetPos{obj.outputLog.actualTarget(currT)}/50; % 50 is a scale factor: the higher the number the lower the resulting speeds
+            end
+            obj.linearMap.mat=zeros(size(x,2)+1,2);
+            for currDim=1:2
+                [B,fitInfo]=lasso(x,y(:,currDim),'Alpha',.5,'CV',10);
+                obj.linearMap.mat(1:end-1,currDim)=B(:,fitInfo.Index1SE);
+                obj.linearMap.mat(end,currDim)=fitInfo.Intercept(fitInfo.Index1SE);
+            end
+        end
+        
+        function r=testMap(obj)
+            % This function just returns Pearson's coefficient between
+            % estimated speeds according to current linearMap and recorded
+            % feats during session. Only works for 1D, horz, free-running
+            % trials
+            x=cat(2,obj.outputLog.feats,ones(length(obj.outputLog.feats),1));
+            estSpeed=x*obj.linearMap.mat;
+            r=corrcoef(estSpeed(:,1),obj.outputLog.actualTarget);
+        end
+        
+        function obj=compute2Dmap(obj)
+            % Tries to obtain a 2D mapping of coordinates from a 2D, forced
+            % run
+            % Only consider samples during cue presentation
+            relIdx=find(obj.outputLog.stage==2);
+            relIdx=relIdx(randperm(length(relIdx)));
+            relIdx2=relIdx(end/2+1:end);
+            relIdx=relIdx(1:end/2);
+            y=zeros(length(relIdx),2);
+            classLog=zeros(length(relIdx),1);
+            for currT=1:length(relIdx)
+                y(currT,:)=obj.targetPos{obj.outputLog.actualTarget(relIdx(currT))};
+                classLog(currT)=obj.outputLog.actualTarget(relIdx(currT));
+            end
+            y=y-repmat(mean(y),size(y,1),1);
+            x=obj.outputLog.feats(relIdx,:);
+%             fixDim=@(x)repmat(x,length(relIdx),1);
+%             x=(obj.outputLog.feats(relIdx,:)-fixDim(mean(obj.outputLog.feats(relIdx,:))))./fixDim(std(obj.outputLog.feats(relIdx,:)));
+            
+            % Med-filt feats in time within same class, to lessen impact of
+            % artifacts
+            for currClass=1:max(classLog)
+                classIdx=find(classLog==currClass);
+                x(classIdx,:)=medfilt1(x(classIdx(randperm(length(classIdx))),:),3);
+            end
+            
+%             % Linear regression
+%             x=cat(2,x,ones(length(x),1));
+%             obj.linearMap.mat=x\y;
+            
+%             LASSO regression (actually, elastic net)
+            for currDim=1:2
+                [B,fitInfo]=lasso(x,y(:,currDim),'Alpha',.5,'CV',10);
+                obj.linearMap.mat(:,currDim)=cat(1,B(:,fitInfo.Index1SE),fitInfo.Intercept(fitInfo.Index1SE));
+%                 obj.linearMap.mat(1:end-1,currDim)=B(:,fitInfo.Index1SE);
+            end
+            
+%             % Transform output mean speeds so that they match desired
+%             % ones
+%             estSpeed=x*obj.linearMap.mat;
+%             movingPoints=zeros(4,2);
+%             for currClass=1:4
+%                 movingPoints(currClass,:)=mean(estSpeed(classLog==currClass,:));
+%             end
+%             movingPoints=cat(2,movingPoints,ones(length(movingPoints),1));
+%             fixedPoints=cell2mat(obj.targetPos');
+%             b=(movingPoints\fixedPoints)/10;
+%             obj.linearMap.mat=[obj.linearMap.mat*b(1:2,1:2);b(3,:)];
+            
+%             obj.linearMap.mat=zeros(size(obj.rawData.data,2)+1,2);
+%             for currTarget=1:2
+%                 % Base line is down state and opposite of currTarget
+%                 baseLineIdx=find(and(obj.outputLog.stage==2,ismember(obj.outputLog.actualTarget,[3,3-currTarget])));
+%                 % Target is up state and currTarget
+%                 targetIdx=find(and(obj.outputLog.stage==2,ismember(obj.outputLog.actualTarget,[4,currTarget])));
+%                 y=zeros(length(baseLineIdx)+length(targetIdx),2);
+%                 y(1:length(baseLineIdx),:)=repmat(obj.targetPos{3}-obj.targetPos{currTarget},length(baseLineIdx),1);
+%                 y(length(baseLineIdx)+1:end,:)=repmat(obj.targetPos{currTarget}-obj.targetPos{3},length(targetIdx),1);
+%                 x=cat(1,medfilt1(obj.outputLog.feats(baseLineIdx(randperm(length(baseLineIdx))),:),3),medfilt1(obj.outputLog.feats(targetIdx(randperm(length(targetIdx))),:),3));
+%                 % Linear regression
+%                 x=cat(2,x,ones(length(x),1));
+%                 obj.linearMap.mat=obj.linearMap.mat+x\y;
+%                 % LASSO regression (actually, elastic net)
+% %                 for currDim=1:2
+% %                     [B,fitInfo]=lasso(x,y(:,currDim),'Alpha',1,'CV',10);
+% %                     obj.linearMap.mat(:,currDim)=obj.linearMap.mat(:,currDim)+cat(1,B(:,fitInfo.Index1SE),fitInfo.Intercept(fitInfo.Index1SE));
+% %                 end
+%             end
+        end
+        
         %% Dependent properties
         function cTime=get.currTime(obj)
             if obj.isExpClosed
@@ -559,9 +692,9 @@ classdef MI_speed_control
             if sum(~isfinite(cursorSpeed)) % Prevent weird speeds on startup
                 cursorSpeed=[0,0];
             end
-            % Cap speed around .05
-            corrFactor=(pi/2)/.05;
-            cursorSpeed=atan(cursorSpeed*corrFactor)/corrFactor;
+%             % Cap speed around .05
+%             corrFactor=(pi/2)/.05;
+%             cursorSpeed=atan(cursorSpeed*corrFactor)/corrFactor;
         end
         
         function preprocessedData=preprocData(dataWindow,linearMap)
@@ -611,21 +744,21 @@ classdef MI_speed_control
             assignin('base','isExpClosing',1);
         end
         
-%         function spectrogramData=computeSpectrogram(obj)
-%             fltrdData=MI_speed_control.applyLapFilter(obj.rawData.Data);
-%             winSampleLength=round(obj.linearMap.winLength*obj.fs);
-%             winStarts=1:winSampleLength:length(fltrdData)-winSampleLength;
-%             spectrogram=zeros(129,length(winStarts),size(obj.rawData.Data,2));
-%             fprintf('This will take some time...\n');
-%             for currWin=1:length(winStarts)
-%                 for currCh=1:size(obj.rawData.Data,2)
-%                     spectrogram(:,currWin,currCh)=pyulear(detrend(fltrdData(winStarts(currWin):winStarts(currWin)+winSampleLength,currCh)),obj.linearMap.ARmodelOrder);
-%                 end
-%                 fprintf('%d\\%d\n',currWin,length(winStarts));
-%             end
-%             spectrogramData.spctr=spectrogram;
-%             spectrogramData.times=winStarts*obj.linearMap.winLength;
-%         end
+        function spectrogramData=computeSpectrogram(obj)
+            fltrdData=MI_speed_control.applyLapFilter(obj.rawData.Data);
+            winSampleLength=round(obj.linearMap.winLength*obj.fs);
+            winStarts=1:winSampleLength:length(fltrdData)-winSampleLength;
+            spectrogram=zeros(129,length(winStarts),size(obj.rawData.Data,2));
+            fprintf('This will take some time...\n');
+            for currWin=1:length(winStarts)
+                for currCh=1:size(obj.rawData.Data,2)
+                    spectrogram(:,currWin,currCh)=pyulear(detrend(fltrdData(winStarts(currWin):winStarts(currWin)+winSampleLength,currCh)),obj.linearMap.ARmodelOrder);
+                end
+                fprintf('%d\\%d\n',currWin,length(winStarts));
+            end
+            spectrogramData.spctr=spectrogram;
+            spectrogramData.times=winStarts*obj.linearMap.winLength;
+        end
 %         
 %         function plotSpectrogram(spectrogramData)
 %             for currCh=1:size(spectrogramData.spectrogram,2)
